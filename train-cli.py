@@ -768,7 +768,7 @@ def change_f0_method(f0method8):
 
 
 
-if __name__ == '__main__':
+def main1():
     # audio samples dir
     trainset_dir4 = '/content/drive/MyDrive/ai-voice-cloning/voices/janderson'
     # output dir
@@ -838,3 +838,5 @@ if __name__ == '__main__':
     # step3b:训练索引
     [get_info_str(_) for _ in train_index(exp_dir1, version19)]
     yield get_info_str(i18n("全流程结束！"))
+
+[print(_) for _ in main1()]
