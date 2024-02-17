@@ -794,6 +794,8 @@ def main1():
     if_cache_gpu17 = "否"
     if_save_every_weights18="否"
 
+    spk_id5 = 0
+    
     infos = []
 
     def get_info_str(strr):
