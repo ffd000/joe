@@ -772,7 +772,7 @@ def main1():
     # audio samples dir
     trainset_dir4 = '/content/drive/MyDrive/ai-voice-cloning/voices/janderson'
     # output dir
-    exp_dir1 = '/content/drive/MyDrive/ai-voice-cloning/rvc/'
+    exp_dir1 = 'voice-test'
     # target sample rate
     sr2 = '40k'
     # number of cpu cores to use
