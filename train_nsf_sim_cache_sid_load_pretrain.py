@@ -1,15 +1,13 @@
 import sys, os
 
 now_dir = os.getcwd()
-sys.path.append(os.path.join(now_dir))
 sys.path.append(os.path.join(now_dir, "train"))
 import utils
-import datetime
 
 hps = utils.get_hparams()
 os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")
 n_gpus = len(hps.gpus.split("-"))
-from random import shuffle, randint
+from random import shuffle
 import traceback, json, argparse, itertools, math, torch, pdb
 
 torch.backends.cudnn.deterministic = False
@@ -22,7 +20,7 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
-from lib.infer_pack import commons
+from infer_pack import commons
 from time import sleep
 from time import time as ttime
 from data_utils import (
@@ -32,62 +30,31 @@ from data_utils import (
     TextAudioCollate,
     DistributedBucketSampler,
 )
-
-import csv
-
-if hps.version == "v1":
-    from lib.infer_pack.models import (
-        SynthesizerTrnMs256NSFsid as RVC_Model_f0,
-        SynthesizerTrnMs256NSFsid_nono as RVC_Model_nof0,
-        MultiPeriodDiscriminator,
-    )
-else:
-    from lib.infer_pack.models import (
-        SynthesizerTrnMs768NSFsid as RVC_Model_f0,
-        SynthesizerTrnMs768NSFsid_nono as RVC_Model_nof0,
-        MultiPeriodDiscriminatorV2 as MultiPeriodDiscriminator,
-    )
+from infer_pack.models import (
+    SynthesizerTrnMs256NSFsid,
+    SynthesizerTrnMs256NSFsid_nono,
+    MultiPeriodDiscriminator,
+)
 from losses import generator_loss, discriminator_loss, feature_loss, kl_loss
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from process_ckpt import savee
+
 
 global_step = 0
 
 
-class EpochRecorder:
-    def __init__(self):
-        self.last_time = ttime()
-
-    def record(self):
-        now_time = ttime()
-        elapsed_time = now_time - self.last_time
-        self.last_time = now_time
-        elapsed_time_str = str(datetime.timedelta(seconds=elapsed_time))
-        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return f"[{current_time}] | ({elapsed_time_str})"
-
-
 def main():
-    n_gpus = torch.cuda.device_count()
-    if torch.cuda.is_available() == False and torch.backends.mps.is_available() == True:
-        n_gpus = 1
+    # n_gpus = torch.cuda.device_count()
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(randint(20000, 55555))
-    children = []
-    for i in range(n_gpus):
-        subproc = mp.Process(
-            target=run,
-            args=(
-                i,
-                n_gpus,
-                hps,
-            ),
-        )
-        children.append(subproc)
-        subproc.start()
+    os.environ["MASTER_PORT"] = "51545"
 
-    for i in range(n_gpus):
-        children[i].join()
+    mp.spawn(
+        run,
+        nprocs=n_gpus,
+        args=(
+            n_gpus,
+            hps,
+        ),
+    )
 
 
 def run(rank, n_gpus, hps):
@@ -95,7 +62,7 @@ def run(rank, n_gpus, hps):
     if rank == 0:
         logger = utils.get_logger(hps.model_dir)
         logger.info(hps)
-        # utils.check_git_hash(hps.model_dir)
+        utils.check_git_hash(hps.model_dir)
         writer = SummaryWriter(log_dir=hps.model_dir)
         writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"))
 
@@ -136,7 +103,7 @@ def run(rank, n_gpus, hps):
         prefetch_factor=8,
     )
     if hps.if_f0 == 1:
-        net_g = RVC_Model_f0(
+        net_g = SynthesizerTrnMs256NSFsid(
             hps.data.filter_length // 2 + 1,
             hps.train.segment_size // hps.data.hop_length,
             **hps.model,
@@ -144,7 +111,7 @@ def run(rank, n_gpus, hps):
             sr=hps.sample_rate,
         )
     else:
-        net_g = RVC_Model_nof0(
+        net_g = SynthesizerTrnMs256NSFsid_nono(
             hps.data.filter_length // 2 + 1,
             hps.train.segment_size // hps.data.hop_length,
             **hps.model,
@@ -193,22 +160,18 @@ def run(rank, n_gpus, hps):
         # traceback.print_exc()
         epoch_str = 1
         global_step = 0
-        if hps.pretrainG != "":
-            if rank == 0:
-                logger.info("loaded pretrained %s" % (hps.pretrainG))
-            print(
-                net_g.module.load_state_dict(
-                    torch.load(hps.pretrainG, map_location="cpu")["model"]
-                )
-            )  ##测试不加载优化器
-        if hps.pretrainD != "":
-            if rank == 0:
-                logger.info("loaded pretrained %s" % (hps.pretrainD))
-            print(
-                net_d.module.load_state_dict(
-                    torch.load(hps.pretrainD, map_location="cpu")["model"]
-                )
+        if rank == 0:
+            logger.info("loaded pretrained %s %s" % (hps.pretrainG, hps.pretrainD))
+        print(
+            net_g.module.load_state_dict(
+                torch.load(hps.pretrainG, map_location="cpu")["model"]
             )
+        )  ##测试不加载优化器
+        print(
+            net_d.module.load_state_dict(
+                torch.load(hps.pretrainD, map_location="cpu")["model"]
+            )
+        )
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2
@@ -351,8 +314,6 @@ def train_and_evaluate(
         data_iterator = enumerate(train_loader)
 
     # Run steps
-    epoch_recorder = EpochRecorder()
-
     for batch_idx, info in data_iterator:
         # Data
         ## Unpack
@@ -381,7 +342,7 @@ def train_and_evaluate(
             spec = spec.cuda(rank, non_blocking=True)
             spec_lengths = spec_lengths.cuda(rank, non_blocking=True)
             wave = wave.cuda(rank, non_blocking=True)
-            # wave_lengths = wave_lengths.cuda(rank, non_blocking=True)
+            wave_lengths = wave_lengths.cuda(rank, non_blocking=True)
 
         # Calculate
         with autocast(enabled=hps.train.fp16_run):
@@ -466,10 +427,10 @@ def train_and_evaluate(
                     )
                 )
                 # Amor For Tensorboard display
-                if loss_mel > 75:
-                    loss_mel = 75
-                if loss_kl > 9:
-                    loss_kl = 9
+                if loss_mel > 50:
+                    loss_mel = 50
+                if loss_kl > 5:
+                    loss_kl = 5
 
                 logger.info([global_step, lr])
                 logger.info(
@@ -550,74 +511,12 @@ def train_and_evaluate(
                 epoch,
                 os.path.join(hps.model_dir, "D_{}.pth".format(2333333)),
             )
-        if rank == 0 and hps.save_every_weights == "1":
-            if hasattr(net_g, "module"):
-                ckpt = net_g.module.state_dict()
-            else:
-                ckpt = net_g.state_dict()
-            logger.info(
-                "saving ckpt %s_e%s:%s"
-                % (
-                    hps.name,
-                    epoch,
-                    savee(
-                        ckpt,
-                        hps.sample_rate,
-                        hps.if_f0,
-                        hps.name + "_e%s_s%s" % (epoch, global_step),
-                        epoch,
-                        hps.version,
-                        hps,
-                    ),
-                )
-            )
-
-    try:
-        with open("csvdb/stop.csv") as CSVStop:
-            csv_reader = list(csv.reader(CSVStop))
-            stopbtn = (
-                csv_reader[0][0]
-                if csv_reader is not None
-                else (lambda: exec('raise ValueError("No data")'))()
-            )
-            stopbtn = (
-                lambda stopbtn: True
-                if stopbtn.lower() == "true"
-                else (False if stopbtn.lower() == "false" else stopbtn)
-            )(stopbtn)
-    except (ValueError, TypeError, IndexError):
-        stopbtn = False
-
-    if stopbtn:
-        logger.info("Stop Button was pressed. The program is closed.")
-        if hasattr(net_g, "module"):
-            ckpt = net_g.module.state_dict()
-        else:
-            ckpt = net_g.state_dict()
-        logger.info(
-            "saving final ckpt:%s"
-            % (
-                savee(
-                    ckpt,
-                    hps.sample_rate,
-                    hps.if_f0,
-                    hps.name,
-                    epoch,
-                    hps.version,
-                    hps,
-                )
-            )
-        )
-        sleep(1)
-        with open("csvdb/stop.csv", "w+", newline="") as STOPCSVwrite:
-            csv_writer = csv.writer(STOPCSVwrite, delimiter=",")
-            csv_writer.writerow(["False"])
-        os._exit(2333333)
 
     if rank == 0:
-        logger.info("====> Epoch: {} {}".format(epoch, epoch_recorder.record()))
+        logger.info("====> Epoch: {}".format(epoch))
     if epoch >= hps.total_epoch and rank == 0:
         logger.info("Training is done. The program is closed.")
+        from process_ckpt import savee  # def savee(ckpt,sr,if_f0,name,epoch):
 
         if hasattr(net_g, "module"):
             ckpt = net_g.module.state_dict()
@@ -625,19 +524,11 @@ def train_and_evaluate(
             ckpt = net_g.state_dict()
         logger.info(
             "saving final ckpt:%s"
-            % (
-                savee(
-                    ckpt, hps.sample_rate, hps.if_f0, hps.name, epoch, hps.version, hps
-                )
-            )
+            % (savee(ckpt, hps.sample_rate, hps.if_f0, hps.name, epoch))
         )
         sleep(1)
-        with open("csvdb/stop.csv", "w+", newline="") as STOPCSVwrite:
-            csv_writer = csv.writer(STOPCSVwrite, delimiter=",")
-            csv_writer.writerow(["False"])
         os._exit(2333333)
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("spawn")
     main()
