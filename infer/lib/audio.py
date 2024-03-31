@@ -40,6 +40,7 @@ def load_audio(file, sr):
             .run(cmd=["ffmpeg", "-nostdin"], capture_stdout=True, capture_stderr=True)
         )
     except Exception as e:
+        print("stderr:", e.stderr.decode("utf8"))
         raise RuntimeError(f"Failed to load audio: {e}")
 
     return np.frombuffer(out, np.float32).flatten()
