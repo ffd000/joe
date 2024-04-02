@@ -14,6 +14,7 @@ import librosa
 from scipy.io import wavfile
 import multiprocessing
 from my_utils import load_audio
+import librosa.effects as le
 
 mutex = multiprocessing.Lock()
 f = open("%s/preprocess.log" % exp_dir, "a+")
@@ -53,7 +54,8 @@ class PreProcess:
         try:
             audio = load_audio(path, self.sr)
             audio = signal.lfilter(self.bh, self.ah, audio)
-            self.norm_write(audio, idx0, 0)
+            audio_trimmed, _ = le.trim(audio)
+            self.norm_write(audio_trimmed, idx0, 0)
             println("%s->Suc." % path)
         except:
             println("%s->%s" % (path, traceback.format_exc()))
